@@ -104,6 +104,7 @@ static const BarUiDispatchAction_t dispatchActions[BAR_KS_COUNT] = {
 				"act_volreset"},
 		{'!', BAR_DC_GLOBAL, BarUiActSettings, "change settings",
 				"act_settings"},
+		{'*', BAR_DC_SONG, BarUiActNOP, NULL, "act_NOP"},
 		};
 
 #include <piano.h>

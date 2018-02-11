@@ -882,3 +882,15 @@ BarUiActCallback(BarUiActManageStation) {
 	PianoDestroyStationInfo (&reqData.info);
 }
 
+/*	Send a NOP to the event script
+ *	- just resends the current info, including position update.
+ */
+BarUiActCallback(BarUiActNOP) {
+	PianoReturn_t pRet = PIANO_RET_OK;
+	CURLcode wRet = CURLE_OK;
+
+	assert (selSong != NULL);
+
+	BarUiActDefaultEventcmd ("NOP");
+}
+
