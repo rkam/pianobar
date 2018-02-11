@@ -116,6 +116,7 @@ PianoReturn_t PianoRequest (PianoHandle_t *ph, PianoRequest_t *req,
 		case PIANO_REQUEST_GET_STATIONS: {
 			/* get stations, user must be authenticated */
 			assert (ph->user.listenerId != NULL);
+
 			method = "user.getStationList";
 			break;
 		}
@@ -146,7 +147,8 @@ PianoReturn_t PianoRequest (PianoHandle_t *ph, PianoRequest_t *req,
 			assert (reqData != NULL);
 			assert (reqData->trackToken != NULL);
 			assert (reqData->stationId != NULL);
-			assert (reqData->rating != PIANO_RATE_NONE);
+			assert (reqData->rating != PIANO_RATE_NONE &&
+					reqData->rating != PIANO_RATE_TIRED);
 
 			json_object_object_add (j, "stationToken",
 					json_object_new_string (reqData->stationId));
@@ -356,6 +358,8 @@ PianoReturn_t PianoRequest (PianoHandle_t *ph, PianoRequest_t *req,
 			json_object_object_add (j, "stationToken",
 					json_object_new_string (reqData->station->id));
 			json_object_object_add (j, "includeExtendedAttributes",
+					json_object_new_boolean (true));
+			json_object_object_add (j, "includeExtraParams",
 					json_object_new_boolean (true));
 
 			method = "station.getStation";

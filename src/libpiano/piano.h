@@ -21,8 +21,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 */
 
-#ifndef SRC_LIBPIANO_PIANO_H_MFBT13PN
-#define SRC_LIBPIANO_PIANO_H_MFBT13PN
+#pragma once
 
 #include "../config.h"
 
@@ -66,7 +65,8 @@ typedef struct PianoStation {
 typedef enum {
 	PIANO_RATE_NONE = 0,
 	PIANO_RATE_LOVE = 1,
-	PIANO_RATE_BAN = 2
+	PIANO_RATE_BAN = 2,
+	PIANO_RATE_TIRED = 3,
 } PianoSongRating_t;
 
 /* UNKNOWN should be 0, because memset sets audio format to 0 */
@@ -367,4 +367,3 @@ PianoStation_t *PianoFindStationById (PianoStation_t * const,
 		const char * const);
 const char *PianoErrorToStr (PianoReturn_t);
 
-#endif /* SRC_LIBPIANO_PIANO_H_MFBT13PN */
