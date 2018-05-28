@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2008-2014
+Copyright (c) 2008-2018
 	Lars-Dominik Braun <lars@6xq.net>
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -36,7 +36,6 @@ THE SOFTWARE.
 #include <libavcodec/avcodec.h>
 #include <libavutil/avutil.h>
 #include <libavfilter/avfilter.h>
-#include <libavfilter/avfiltergraph.h>
 #include <libavfilter/buffersink.h>
 #include <libavfilter/buffersrc.h>
 #ifdef HAVE_LIBAVFILTER_AVCODEC_H
@@ -66,17 +65,44 @@ static void printError (const BarSettings_t * const settings,
  *	XXX: in theory we can select the filters/formats we want to support, but
  *	this does not work in practise.
  */
-void BarPlayerInit () {
+void BarPlayerInit (player_t * const p, const BarSettings_t * const settings) {
 	ao_initialize ();
 	av_log_set_level (AV_LOG_FATAL);
 	av_register_all ();
 	avfilter_register_all ();
 	avformat_network_init ();
+
+	pthread_mutex_init (&p->lock, NULL);
+	pthread_cond_init (&p->cond, NULL);
+	BarPlayerReset (p);
+	p->settings = settings;
 }
 
-void BarPlayerDestroy () {
+void BarPlayerDestroy (player_t * const p) {
+	pthread_cond_destroy (&p->cond);
+	pthread_mutex_destroy (&p->lock);
+
 	avformat_network_deinit ();
 	ao_shutdown ();
+}
+
+void BarPlayerReset (player_t * const p) {
+	p->doQuit = false;
+	p->doPause = false;
+	p->songDuration = 0;
+	p->songPlayed = 0;
+	p->mode = PLAYER_DEAD;
+	p->fvolume = NULL;
+	p->fgraph = NULL;
+	p->fctx = NULL;
+	p->st = NULL;
+	p->cctx = NULL;
+	p->fbufsink = NULL;
+	p->fabuf = NULL;
+	p->streamIdx = -1;
+	p->lastTimestamp = 0;
+	p->interrupted = 0;
+	p->aoDev = NULL;
 }
 
 /*	Update volume filter
@@ -122,7 +148,9 @@ static int intCb (void * const data) {
 	assert (player != NULL);
 	if (player->interrupted > 1) {
 		/* got a sigint multiple times, quit pianobar (handled by main.c). */
+		pthread_mutex_lock (&player->lock);
 		player->doQuit = true;
+		pthread_mutex_unlock (&player->lock);
 		return 1;
 	} else if (player->interrupted != 0) {
 		/* the request is retried with the same player context */
@@ -145,8 +173,16 @@ static bool openStream (player_t * const player) {
 	player->fctx->interrupt_callback.callback = intCb;
 	player->fctx->interrupt_callback.opaque = player;
 
+	/* in microseconds */
+	unsigned long int timeout = player->settings->timeout*1000000;
+	char timeoutStr[16];
+	ret = snprintf (timeoutStr, sizeof (timeoutStr), "%lu", timeout);
+	assert (ret < sizeof (timeoutStr));
+	AVDictionary *options = NULL;
+	av_dict_set (&options, "timeout", timeoutStr, 0);
+
 	assert (player->url != NULL);
-	if ((ret = avformat_open_input (&player->fctx, player->url, NULL, NULL)) < 0) {
+	if ((ret = avformat_open_input (&player->fctx, player->url, NULL, &options)) < 0) {
 		softfail ("Unable to open audio file");
 	}
 
@@ -190,9 +226,12 @@ static bool openStream (player_t * const player) {
 		av_seek_frame (player->fctx, player->streamIdx, player->lastTimestamp, 0);
 	}
 
-	player->songPlayed = 0;
-	player->songDuration = av_q2d (player->st->time_base) *
+	const unsigned int songDuration = av_q2d (player->st->time_base) *
 			(double) player->st->duration;
+	pthread_mutex_lock (&player->lock);
+	player->songPlayed = 0;
+	player->songDuration = songDuration;
+	pthread_mutex_unlock (&player->lock);
 
 	return true;
 }
@@ -283,6 +322,29 @@ static bool openDevice (player_t * const player) {
 	return true;
 }
 
+/*	Operating on shared variables and must be protected by mutex
+ */
+
+static bool shouldQuit (player_t * const player) {
+	pthread_mutex_lock (&player->lock);
+	const bool ret = player->doQuit;
+	pthread_mutex_unlock (&player->lock);
+	return ret;
+}
+
+static void changeMode (player_t * const player, unsigned int mode) {
+	pthread_mutex_lock (&player->lock);
+	player->mode = mode;
+	pthread_mutex_unlock (&player->lock);
+}
+
+BarPlayerMode BarPlayerGetMode (player_t * const player) {
+	pthread_mutex_lock (&player->lock);
+	const BarPlayerMode ret = player->mode;
+	pthread_mutex_unlock (&player->lock);
+	return ret;
+}
+
 /*	decode and play stream. returns 0 or av error code.
  */
 static int play (player_t * const player) {
@@ -302,7 +364,7 @@ static int play (player_t * const player) {
 
 	enum { FILL, DRAIN, DONE } drainMode = FILL;
 	int ret = 0;
-	while (!player->doQuit && drainMode != DONE) {
+	while (!shouldQuit (player) && drainMode != DONE) {
 		if (drainMode == FILL) {
 			ret = av_read_frame (player->fctx, &pkt);
 			if (ret == AVERROR_EOF) {
@@ -323,17 +385,17 @@ static int play (player_t * const player) {
 		}
 
 		/* pausing */
-		pthread_mutex_lock (&player->pauseMutex);
+		pthread_mutex_lock (&player->lock);
 		if (player->doPause) {
 			av_read_pause (player->fctx);
 			do {
-				pthread_cond_wait (&player->pauseCond, &player->pauseMutex);
+				pthread_cond_wait (&player->cond, &player->lock);
 			} while (player->doPause);
 			av_read_play (player->fctx);
 		}
-		pthread_mutex_unlock (&player->pauseMutex);
+		pthread_mutex_unlock (&player->lock);
 
-		while (!player->doQuit) {
+		while (!shouldQuit (player)) {
 			ret = avcodec_receive_frame (cctx, frame);
 			if (ret == AVERROR_EOF) {
 				/* done draining */
@@ -367,7 +429,10 @@ static int play (player_t * const player) {
 			}
 		}
 
-		player->songPlayed = av_q2d (player->st->time_base) * (double) pkt.pts;
+		const unsigned int songPlayed = av_q2d (player->st->time_base) * (double) pkt.pts;
+		pthread_mutex_lock (&player->lock);
+		player->songPlayed = songPlayed;
+		pthread_mutex_unlock (&player->lock);
 		player->lastTimestamp = pkt.pts;
 
 		av_packet_unref (&pkt);
@@ -410,7 +475,7 @@ void *BarPlayerThread (void *data) {
 		retry = false;
 		if (openStream (player)) {
 			if (openFilter (player) && openDevice (player)) {
-				player->mode = PLAYER_PLAYING;
+				changeMode (player, PLAYER_PLAYING);
 				BarPlayerSetVolume (player);
 				retry = play (player) == AVERROR_INVALIDDATA &&
 						!player->interrupted;
@@ -422,11 +487,11 @@ void *BarPlayerThread (void *data) {
 			/* stream not found */
 			pret = PLAYER_RET_SOFTFAIL;
 		}
-		player->mode = PLAYER_WAITING;
+		changeMode (player, PLAYER_WAITING);
 		finish (player);
 	} while (retry);
 
-	player->mode = PLAYER_FINISHED;
+	changeMode (player, PLAYER_FINISHED);
 
 	return (void *) pret;
 }

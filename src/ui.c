@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2008-2013
+Copyright (c) 2008-2018
 	Lars-Dominik Braun <lars@6xq.net>
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -205,6 +205,7 @@ static CURLcode BarPianoHttpRequest (CURL * const http,
 	setAndCheck (CURLOPT_PROGRESSDATA, &lint);
 	setAndCheck (CURLOPT_NOPROGRESS, 0);
 	setAndCheck (CURLOPT_POST, 1);
+	setAndCheck (CURLOPT_TIMEOUT, settings->timeout);
 	if (settings->caBundle != NULL) {
 		setAndCheck (CURLOPT_CAINFO, settings->caBundle);
 	}
@@ -241,7 +242,21 @@ static CURLcode BarPianoHttpRequest (CURL * const http,
 	list = curl_slist_append (list, "Content-Type: text/plain");
 	setAndCheck (CURLOPT_HTTPHEADER, list);
 
-	httpret = curl_easy_perform (http);
+	unsigned int retry = 0;
+	do {
+		httpret = curl_easy_perform (http);
+		++retry;
+		if (httpret == CURLE_OPERATION_TIMEDOUT) {
+			free (buffer.data);
+			buffer.data = NULL;
+			buffer.pos = 0;
+			if (retry > settings->maxRetry) {
+				break;
+			}
+		} else {
+			break;
+		}
+	} while (true);
 
 	curl_slist_free_all (list);
 
@@ -814,7 +829,7 @@ size_t BarUiListSongs (const BarApp_t * const app,
  */
 void BarUiStartEventCmd (const BarSettings_t *settings, const char *type,
 		const PianoStation_t *curStation, const PianoSong_t *curSong,
-		const player_t * const player, PianoStation_t *stations,
+		player_t * const player, PianoStation_t *stations,
 		PianoReturn_t pRet, CURLcode wRet) {
 	pid_t chld;
 	int pipeFd[2];
@@ -855,6 +870,11 @@ void BarUiStartEventCmd (const BarSettings_t *settings, const char *type,
 			songStation = PianoFindStationById (stations, curSong->stationId);
 		}
 
+		pthread_mutex_lock (&player->lock);
+		const unsigned int songDuration = player->songDuration;
+		const unsigned int songPlayed = player->songPlayed;
+		pthread_mutex_unlock (&player->lock);
+
 		fprintf (pipeWriteFd,
 				"artist=%s\n"
 				"title=%s\n"
@@ -880,8 +900,8 @@ void BarUiStartEventCmd (const BarSettings_t *settings, const char *type,
 				PianoErrorToStr (pRet),
 				wRet,
 				curl_easy_strerror (wRet),
-				player->songDuration,
-				player->songPlayed,
+				songDuration,
+				songPlayed,
 				curSong == NULL ? PIANO_RATE_NONE : curSong->rating,
 				curSong == NULL ? "" : curSong->detailUrl
 				);
